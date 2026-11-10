@@ -59,7 +59,7 @@ class NetworkOptimizer(
             else -> {
                 if (VpnService.prepare(context) == null) {
                     LocalDnsVpnService.start(context)
-                    steps += "Güvenli DNS tüneli başlatıldı (1.1.1.1 · 1.0.0.1 · 8.8.8.8)"
+                    steps += "Güvenli DNS tüneli başlatıldı"
                 } else {
                     permissionRequired = true
                     steps += "DNS tüneli için VPN izni gerekiyor"
@@ -83,11 +83,13 @@ class NetworkOptimizer(
         OptimizationReport(steps, recommendOperatorSettings = weak, vpnPermissionRequired = permissionRequired)
     }
 
-    /** Opens the operator network screen, falling back through progressively more generic settings pages. */
+    /**
+     * Opens the operator network screen using only public AOSP Settings actions (no OEM component
+     * names), falling back to the generic wireless page and finally the Settings root.
+     */
     fun openOperatorSettings(activityContext: Context): Boolean {
         val candidates = listOf(
             Intent(Settings.ACTION_NETWORK_OPERATOR_SETTINGS),
-            Intent(Settings.ACTION_DATA_ROAMING_SETTINGS),
             Intent(Settings.ACTION_WIRELESS_SETTINGS),
             Intent(Settings.ACTION_SETTINGS),
         )

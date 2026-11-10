@@ -14,10 +14,13 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.netpulse.optimizer.NetPulseApp
 import com.netpulse.optimizer.data.diagnostics.NetworkDiagnosticsHelper
+import com.netpulse.optimizer.data.settings.DnsSettingsRepository
 import com.netpulse.optimizer.data.vpn.VpnStateRepository
 import com.netpulse.optimizer.domain.model.DiagnosticsSnapshot
+import com.netpulse.optimizer.domain.model.DnsProfileId
+import com.netpulse.optimizer.domain.model.DnsSettings
 import com.netpulse.optimizer.domain.model.DnsTunnelState
-import com.netpulse.optimizer.domain.model.TunnelStatus
+import com.netpulse.optimizer.domain.model.isActive
 import com.netpulse.optimizer.optimizer.NetworkOptimizer
 import com.netpulse.optimizer.vpn.LocalDnsVpnService
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -31,25 +34,29 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+data class OptimizationUi(
+    val running: Boolean = false,
+    val steps: List<String> = emptyList(),
+)
 
 data class MainUiState(
     val diagnostics: DiagnosticsSnapshot = DiagnosticsSnapshot(),
     val tunnel: DnsTunnelState = DnsTunnelState(),
-    val isOptimizing: Boolean = false,
-    val report: List<String> = emptyList(),
+    val optimization: OptimizationUi = OptimizationUi(),
     val permissionsGranted: Boolean = true,
+    val dnsSettings: DnsSettings = DnsSettings(),
 ) {
-    val vpnEnabled: Boolean
-        get() = tunnel.status == TunnelStatus.RUNNING ||
-            tunnel.status == TunnelStatus.STARTING ||
-            tunnel.status == TunnelStatus.REFRESHING
+    val vpnEnabled: Boolean get() = tunnel.status.isActive
 }
 
 sealed interface MainEvent {
     data class RequestVpnPermission(val intent: Intent) : MainEvent
     data object OpenOperatorSettings : MainEvent
     data class Message(val text: String) : MainEvent
+    data class OptimizationCompleted(val summary: String) : MainEvent
 }
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -57,6 +64,7 @@ class MainViewModel(
     private val app: Application,
     private val diagnosticsHelper: NetworkDiagnosticsHelper,
     private val optimizer: NetworkOptimizer,
+    private val dnsSettingsRepository: DnsSettingsRepository,
     vpnRepository: VpnStateRepository,
 ) : ViewModel() {
 
@@ -64,8 +72,7 @@ class MainViewModel(
 
     /** Bumped after runtime permissions change so the telephony callbacks are re-registered. */
     private val permissionEpoch = MutableStateFlow(0)
-    private val optimizing = MutableStateFlow(false)
-    private val report = MutableStateFlow<List<String>>(emptyList())
+    private val optimization = MutableStateFlow(OptimizationUi())
     private val permissionsGranted = MutableStateFlow(hasCorePermissions(app))
     private var pendingAfterVpnPermission: PendingAction? = null
 
@@ -79,12 +86,14 @@ class MainViewModel(
     val uiState: StateFlow<MainUiState> = combine(
         diagnostics,
         vpnRepository.state,
-        optimizing,
-        report,
+        optimization,
         permissionsGranted,
-    ) { diag, tunnel, isOptimizing, steps, granted ->
-        MainUiState(diag, tunnel, isOptimizing, steps, granted)
+        dnsSettingsRepository.settings,
+    ) { diag, tunnel, opt, granted, dns ->
+        MainUiState(diag, tunnel, opt, granted, dns)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainUiState())
+
+    // ------------------------------------------------------------------ Permissions
 
     fun onPermissionsResult() {
         permissionsGranted.value = hasCorePermissions(app)
@@ -94,6 +103,8 @@ class MainViewModel(
     fun refreshPermissionsIfChanged() {
         if (hasCorePermissions(app) != permissionsGranted.value) onPermissionsResult()
     }
+
+    // ------------------------------------------------------------------ Tunnel
 
     fun onVpnToggle(enabled: Boolean) {
         if (enabled) {
@@ -122,29 +133,50 @@ class MainViewModel(
         }
     }
 
+    // ------------------------------------------------------------------ DNS profiles
+
+    fun selectDnsProfile(id: DnsProfileId) {
+        dnsSettingsRepository.selectProfile(id)
+    }
+
+    fun saveCustomDns(primary: String, secondary: String) {
+        when (val result = dnsSettingsRepository.saveCustomServers(listOf(primary, secondary))) {
+            DnsSettingsRepository.SaveResult.Saved ->
+                events.trySend(MainEvent.Message("Özel DNS kaydedildi"))
+            DnsSettingsRepository.SaveResult.Empty ->
+                events.trySend(MainEvent.Message("En az bir DNS IP adresi girin"))
+            is DnsSettingsRepository.SaveResult.Invalid ->
+                events.trySend(MainEvent.Message("Geçersiz IP: ${result.inputs.joinToString()}"))
+        }
+    }
+
+    // ------------------------------------------------------------------ Optimise
+
     fun optimize() {
-        if (optimizing.value) return
+        if (optimization.value.running) return
         viewModelScope.launch {
-            optimizing.value = true
+            optimization.update { it.copy(running = true) }
             try {
                 val result = optimizer.optimize(uiState.value.diagnostics)
-                report.value = result.steps
+                optimization.value = OptimizationUi(running = false, steps = result.steps)
                 if (result.vpnPermissionRequired) {
                     VpnService.prepare(app)?.let { consent ->
                         pendingAfterVpnPermission = PendingAction.OPTIMIZE
                         events.send(MainEvent.RequestVpnPermission(consent))
                     }
+                } else {
+                    events.send(MainEvent.OptimizationCompleted("Optimizasyon tamamlandı"))
                 }
                 if (result.recommendOperatorSettings) events.send(MainEvent.OpenOperatorSettings)
             } finally {
-                optimizing.value = false
+                optimization.update { it.copy(running = false) }
             }
         }
     }
 
     fun openOperatorSettings(activityContext: Context) {
         if (!optimizer.openOperatorSettings(activityContext)) {
-            events.trySend(MainEvent.Message("Operatör ayarları açılamadı"))
+            events.trySend(MainEvent.Message("Ağ ayarları açılamadı"))
         }
     }
 
@@ -171,6 +203,7 @@ class MainViewModel(
                     app = app,
                     diagnosticsHelper = app.container.diagnosticsHelper,
                     optimizer = app.container.networkOptimizer,
+                    dnsSettingsRepository = app.container.dnsSettingsRepository,
                     vpnRepository = app.container.vpnStateRepository,
                 )
             }

@@ -1,80 +1,97 @@
-# NetPulse — Galaxy A55 için hücresel ağ optimizasyonu
+# NetPulse
 
-Android `VpnService` tabanlı **yalnızca-DNS** tüneli, gerçek zamanlı radyo (RSRP/RSRQ/SINR) ve RTT takibi.
-Operatörün fiziksel hız sınırı aşılmaz. Uygulamanın yaptıkları: DNS gecikmesini azaltmak, MTU'yu ayarlamak
-ve darboğazın radyoda mı (kapsama, girişim, yoğunluk) yoksa gecikme/kayıpta mı olduğunu göstermek.
+**Lightweight, zero-drain local DNS proxy and real-time cellular diagnostics for Android.**
 
-## Aşama 1 — Mimari
+Android 12–17 · Herhangi bir üretici (OEM bağımsız) · Root gerekmez · Sadece açık AOSP API'leri
 
-### 1. Paketler, DI, thread yönetimi
+---
+
+## Özellikler
+
+| | |
+|---|---|
+| 🛡️ **Yerel DNS tüneli** | Yalnızca DNS trafiğini yakalayan `VpnService`. TTL'li önbellek, en hızlı sunucudan başlayıp gerekirse diğerlerini de yarıştıran (hedging) soket havuzu, TCP yedeği |
+| 🎚️ **DNS profilleri** | Hız (Cloudflare/Google), Güvenlik (Quad9), Reklam engelleme (AdGuard), Özel IP. Tünel açıkken anında geçiş |
+| 📶 **Canlı radyo ölçümü** | 5G SA/NSA, 4.5G ve LTE ayrımı; RSRP, RSRQ, SINR, 0–100 kalite skoru ve darboğaz tespiti |
+| 📈 **Gecikme grafiği** | Son 30 saniyenin ping, jitter ve paket kaybı grafiği |
+| 🗼 **Hücre bilgisi** | Operatör (MCC-MNC), eNodeB/gNodeB, PCI, TAC, band ve frekans |
+| ⚡ **Hızlı Ayarlar kutucuğu** | Bildirim panelinden tek dokunuşla tüneli aç/kapat, canlı skoru gör (`92/100 • Mükemmel`) |
+| 🎨 **Material You** | Dinamik renkler, dairesel skor göstergesi, haptik geri bildirim, tam edge-to-edge |
+
+## Neden gecikme ve pil maliyeti yok?
+
+Tünele **yalnızca iki sanal DNS adresi** yönlendirilir. Video, oyun ve indirme trafiği VPN'e hiç girmez,
+normal yolundan gider. Uygulama sadece birkaç yüz baytlık DNS paketlerini işler.
+
+```mermaid
+flowchart LR
+    A[Uygulamalar] -->|DNS sorgusu| T[TUN<br/>10.111.222.2/.3]
+    A -->|Diğer tüm trafik| N[(Fiziksel ağ<br/>LTE / 5G / Wi‑Fi)]
+    T --> C{TTL önbellek}
+    C -->|isabet ~0 ms| T
+    C -->|kaçırma| P[Hedged soket havuzu<br/>VPN dışı korumalı soketler]
+    P --> R1[Birincil DNS]
+    P -.->|1,5×RTT gecikirse| R2[İkincil DNS]
+    P -.-> R3[Üçüncül DNS]
+    R1 & R2 & R3 --> N
+```
+
+- **Önbellek isabeti** ~0 ms. Hücresel ağda tipik DNS sorgusu 40–150 ms sürer.
+- **Hedging:** önce en hızlı sunucu sorgulanır. EWMA RTT'nin 1,5 katı içinde yanıt gelmezse diğerleri de yarışa katılır,
+  ilk geçerli yanıt kazanır. Paket kaybından kaynaklanan uzun takılmalar böylece kesilir.
+- **Kalıcı soketler:** her sorgu için yeni soket açılmaz. Rastgele transaction-id ile çoğullama yapılır.
+- **Pil:** ölçümler sadece ekran açıkken veya Hızlı Ayarlar paneli açıkken çalışır. Telefon sinyali olay tabanlı okunur, sürekli sorgulanmaz.
+
+## Sinyal parametreleri
+
+| Parametre | Ne ölçer? | Mükemmel | Orta | Zayıf |
+|---|---|---|---|---|
+| **RSRP** | Baz istasyonundan gelen referans sinyal gücü (kapsama) | ≥ −85 dBm | −85…−105 dBm | ≤ −110 dBm |
+| **RSRQ** | Sinyalin, toplam gürültü ve yüke oranı (hücre yoğunluğu) | ≥ −8 dB | −8…−15 dB | ≤ −18 dB |
+| **SINR** | Sinyal / (girişim + gürültü) (hız potansiyeli) | ≥ 20 dB | 5…20 dB | < 0 dB |
+| **RTT** | İnternete gidiş-dönüş gecikmesi (TCP el sıkışması) | ≤ 30 ms | 30…120 ms | ≥ 200 ms |
+
+Skor = RSRP %35 + SINR %25 + RSRQ %15 + RTT %25. Paket kaybı varsa ceza uygulanır.
+En zayıf bileşen "darboğaz" olarak gösterilir.
+
+## Mimari
+
 ```
 com.netpulse.optimizer
-├── core/di/AppContainer.kt        Elle yazılmış DI (tek process, ~6 düğüm; Hilt/kapt maliyeti yok)
-├── domain/                        Saf Kotlin: modeller + SignalScorer (Android bağımlılığı yok)
-├── data/
-│   ├── connectivity/              ConnectivityMonitor: VPN dışındaki fiziksel ağ, MTU, bant genişliği
-│   ├── diagnostics/               NetworkDiagnosticsHelper: TelephonyCallback + TCP RTT (Flow)
-│   └── vpn/                       VpnStateRepository (StateFlow, servis ↔ UI)
-├── vpn/
-│   ├── LocalDnsVpnService.kt      TUN yaşam döngüsü, paket döngüsü, foreground bildirimi
-│   ├── MtuResolver.kt             1400–1500 MTU seçimi
-│   ├── packet/IpPacketCodec.kt    IPv4/UDP/TCP ayrıştırma, checksum, IP fragmentasyonu, TCP RST
-│   └── dns/                       DnsMessage, TTL'li LRU DnsCache, hedge'li DnsUpstreamPool
-├── optimizer/NetworkOptimizer.kt  "Optimize Et" iş akışı
-└── ui/                            Compose MainScreen + MainViewModel (MVVM, StateFlow)
+├── core/di        AppContainer: elle yazılmış DI (reflection yok, hızlı derleme)
+├── domain         Saf Kotlin: modeller, DnsProfiles, SignalScorer
+├── data
+│   ├── connectivity   Fiziksel (VPN dışı) ağ, MTU, bant genişliği
+│   ├── diagnostics    TelephonyCallback, CellIdentityReader, TCP RTT (Flow)
+│   ├── settings       DnsSettingsRepository (profil ve özel IP)
+│   └── vpn            VpnStateRepository (StateFlow, servis ↔ UI ↔ kutucuk)
+├── vpn            LocalDnsVpnService, IPv4/UDP/TCP codec, DnsCache, DnsUpstreamPool, MtuResolver
+├── optimizer      "Ağı Optimize Et" iş akışı
+├── tile           DnsTileService (Hızlı Ayarlar)
+└── ui             Compose: MainScreen, RadialGauge, LatencySparkline, DnsProfileCard, CellInfoCard
 ```
-* **Coroutines:** Servis `SupervisorJob + Dispatchers.IO` kullanır. Her DNS sorgusu kendi coroutine'inde çalışır
-  (eşzamanlı en fazla 128, `Semaphore`). TUN'a yazma tek bir writer coroutine üzerinden `Channel` ile yapılır.
-  Bu sayede fd'ye yazmalar sıralı kalır, ek kilit gerekmez.
-* **StateFlow:** `VpnStateRepository` (servis yazar), `ConnectivityMonitor.linkState` ve ViewModel'deki
-  `combine(...).stateIn(WhileSubscribed(5s))`. Ekran kapanınca telefon callback'leri ve ping döngüsü durur, pil harcanmaz.
 
-### 2. VpnService ve DNS yönlendirme
-* TUN arayüzünün adresi `10.111.222.1/32`. Tünele **yalnızca** sanal çözücüler `10.111.222.2` ve `.3` yönlendirilir.
-  Sistem DNS'i bu adreslere ayarlanır. Böylece tüm uygulamaların DNS sorguları tünele girer, diğer tüm trafik
-  hiç dokunulmadan fiziksel ağdan akar. Ek gecikme ve pil maliyeti olmaz.
-* `allowFamily(AF_INET6)` eklendi. Bu olmadan Android, VPN'de IPv6 yapılandırması bulunmadığı için IPv6 trafiğini engellerdi.
-* UDP/53 sorgusu şu yolu izler: TTL'li önbellek (yaşlandırılmış TTL ile) → yoksa korumalı (`protect()`) soket havuzu.
-  Her upstream (1.1.1.1, 1.0.0.1, 8.8.8.8) için kalıcı, bağlı bir UDP soketi vardır ve rastgele transaction-id ile
-  çoğullanır. **Hedging:** önce en hızlı upstream sorgulanır. EWMA RTT'nin 1,5 katı içinde yanıt gelmezse sıradaki
-  upstream de yarışa katılır. İlk geçerli yanıt kazanır. Hücresel paket kaybından kaynaklanan uzun gecikme kuyrukları böyle kesilir.
-* TC (truncated) gelen yanıtlar TCP üzerinden yeniden alınır. MTU'yu aşan yanıtlar kesilmez, IP fragmentasyonu ile iletilir.
-* Sanal çözücüye gelen TCP bağlantılarına (DNS-over-TCP, :853 DoT denemesi) anında RST dönülür. İstemci saniyelerce SYN zaman aşımı beklemez.
-* Ağ değişince (Wi-Fi ↔ hücresel, yeniden bağlanma; 800 ms debounce) `setUnderlyingNetworks` çağrılır, soket havuzu
-  yeniden kurulur ve önbellek temizlenir. Tazelemede önce yeni TUN kurulur, sonra eskisi kapatılır. DNS'te kesinti olmaz.
-* Always-on VPN desteklenir (`SUPPORTS_ALWAYS_ON`). FGS tipi `specialUse` (Android 14+ zorunluluğu).
+- **Coroutines ve StateFlow:** Tek veri kaynağı repository'lerdir. UI `WhileSubscribed(5s)` ile abone olur.
+- **Android 14+:** `specialUse` tipinde foreground service, `FOREGROUND_SERVICE_SPECIAL_USE` izni ve Always-on VPN desteği.
+- **Android 15–17:** zorunlu edge-to-edge (`WindowInsets.safeDrawing`), predictive back, `targetSdk 36`.
+- **OEM bağımsız:** üreticiye özel intent veya gizli API yok. Ağ ayarları için sadece `ACTION_NETWORK_OPERATOR_SETTINGS`, `ACTION_WIRELESS_SETTINGS` ve `ACTION_SETTINGS` sırayla denenir.
 
-### 3. Sinyal ve RTT analizi
-* `TelephonyCallback.SignalStrengthsListener` ve `DisplayInfoListener` olay tabanlıdır, polling yapılmaz.
-  NR (SA veya NSA) değeri varsa `ssRsrp/ssRsrq/ssSinr`, yoksa LTE `rsrp/rsrq/rssnr` okunur.
-  Samsung modemleri bazı değerleri boş bırakırsa `allCellInfo` yedek olarak kullanılır.
-* Ağ türü: `NETWORK_TYPE_NR` → 5G SA. `OVERRIDE_NR_NSA/ADVANCED` → 5G. `OVERRIDE_LTE_CA/ADVANCED_PRO` → 4.5G.
-* RTT: 2 saniyede bir 1.1.1.1:443 ve 8.8.8.8:443 adreslerine paralel TCP el sıkışması yapılır.
-  SYN/SYN-ACK süresi ICMP ping'e eşdeğerdir ve root gerektirmez. Son 10 örnekten ortalama, jitter ve kayıp yüzdesi hesaplanır.
-* `SignalScorer` 3GPP saha eşiklerini kullanır: RSRP −115…−85, SINR 0…20, RSRQ −18…−8, RTT 200…30 ms.
-  Bunlar ağırlıklı ortalamayla 0–100 skora çevrilir ve kayıp cezası uygulanır.
-  Sonuç Zayıf/Orta/Mükemmel olarak gösterilir. En kötü bileşen darboğaz olarak raporlanır.
+## Kurulum
 
-### 4. CI/CD
-`.github/workflows/build-apk.yml` her push'ta şunları yapar: Ubuntu, JDK 17, Android SDK, Gradle 8.11.1 →
-`assembleDebug` → `app-debug.apk` dosyasını hem Artifact olarak hem de **Release** olarak yayınlar
-(telefondan tek dokunuşla indirilir). Debug keystore önbellekte tutulur. Böylece her yeni APK eskisinin üzerine kurulur, kaldırma gerekmez.
+1. [Releases](../../releases/latest) sayfasından `app-debug.apk` dosyasını telefona indirin.
+2. Dosyayı açın, **Bilinmeyen uygulamalara izin ver** seçeneğini açın ve **Yükle**'ye basın.
+3. Uygulamada Telefon ve Konum izinlerini verin, **DNS Tüneli** anahtarını açın.
+4. *(İsteğe bağlı)* Bildirim panelini aşağı çekin, ✏️ ile **NetPulse DNS** kutucuğunu ekleyin.
 
-## Telefona kurulum (≈2 dk)
-
-1. Git ve GitHub CLI'yi kurup oturum açın (bir kez):
-   ```bash
-   winget install --id Git.Git -e; winget install --id GitHub.cli -e; gh auth login
-   ```
-2. Repoyu oluşturup gönderin. Workflow kendiliğinden başlar:
-   ```bash
-   git init -b main; git add .; git commit -m "NetPulse"; gh repo create netpulse --public --source . --push
-   ```
-3. Yaklaşık 3–4 dakika sonra telefonda `https://github.com/<kullanıcı-adınız>/netpulse/releases/latest` adresini açın.
-   `app-debug.apk` dosyasına dokunun, **Bilinmeyen uygulamalara izin ver** seçeneğini açın, ardından **Yükle**'ye basın.
+Kaynaktan derlemek için: `gradle :app:assembleDebug` (JDK 17, Gradle 8.14+). Her push'ta GitHub Actions APK'yı otomatik
+derleyip Releases'e yükler.
 
 ## Bilinen sınırlar
-* **Ayarlar → Bağlantılar → Diğer ağ ayarları → Özel DNS** bir sunucu adına ayarlıysa (katı mod), Android DNS'i
-  doğrudan DoT ile gönderir ve tünel devre dışı kalır. En iyi sonuç için Özel DNS'i **Kapalı** veya **Otomatik** yapın.
-* Bant/RAT seçimi modem tarafından yapılır, uygulama bunu zorlayamaz. Zayıf bantta yalnızca operatör ağ ekranına yönlendirir.
-* Tarayıcıların kendi "Güvenli DNS" (DoH) ayarı açıksa bu tarayıcılar tüneli kullanmaz.
+
+- Android'de **Özel DNS** ayarı bir sunucu adına (katı mod) ayarlıysa DNS tünel yerine doğrudan DoT ile gider.
+  Ayarı *Kapalı* veya *Otomatik* yapın.
+- Bant ve RAT seçimini modem yapar. Uygulama bunu zorlayamaz, sadece operatör ağ ekranına yönlendirir.
+- gNodeB ID, NCI değerinden 24 bitlik gNB ID varsayımıyla türetilir. Gerçek bit uzunluğunu operatör belirler.
+- Bu sürümde upstream sorguları klasik UDP/TCP DNS ile yapılır. DoH/DoT, bağlantı yeniden kullanımıyla birlikte ileride eklenecek.
+
+Sürüm geçmişi için: [CHANGELOG.md](CHANGELOG.md)

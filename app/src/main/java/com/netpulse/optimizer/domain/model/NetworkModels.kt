@@ -2,7 +2,7 @@ package com.netpulse.optimizer.domain.model
 
 enum class RadioTechnology(val label: String) {
     NR_SA("5G SA"),
-    NR_NSA("5G"),
+    NR_NSA("5G NSA"),
     LTE_ADVANCED("4.5G"),
     LTE("4G LTE"),
     LEGACY("3G/2G"),
@@ -28,6 +28,8 @@ data class LatencyMetrics(
     val jitterMs: Long? = null,
     val lossPercent: Int = 0,
     val samples: Int = 0,
+    /** Oldest → newest RTT samples of the rolling window; null = probe lost. */
+    val history: List<Long?> = emptyList(),
 )
 
 enum class LinkTransport(val label: String) {
@@ -46,6 +48,41 @@ data class LinkMetrics(
     val vpnActive: Boolean = false,
 )
 
+/** LTE serving / anchor cell identity from CellIdentityLte. */
+data class LteCellDetails(
+    val mcc: String?,
+    val mnc: String?,
+    val operatorName: String?,
+    val cellId: Int?,
+    val eNodeBId: Int?,
+    val sectorId: Int?,
+    val pci: Int?,
+    val tac: Int?,
+    val earfcn: Int?,
+    val bands: List<Int>,
+)
+
+/** NR cell identity from CellIdentityNr. In NSA mode this is the secondary (non-registered) leg. */
+data class NrCellDetails(
+    val mcc: String?,
+    val mnc: String?,
+    val operatorName: String?,
+    val nci: Long?,
+    /** Derived assuming a 24-bit gNB ID (the most common split); the true length is operator-configured. */
+    val gNodeBId: Long?,
+    val pci: Int?,
+    val tac: Int?,
+    val nrarfcn: Int?,
+    val bands: List<Int>,
+    val registered: Boolean,
+)
+
+data class CellDetails(
+    val lte: LteCellDetails? = null,
+    val nr: NrCellDetails? = null,
+    val permissionMissing: Boolean = false,
+)
+
 enum class SignalQuality(val label: String) {
     WEAK("Zayıf"),
     FAIR("Orta"),
@@ -55,11 +92,11 @@ enum class SignalQuality(val label: String) {
 
 enum class Bottleneck(val description: String) {
     NONE("Belirgin darboğaz yok"),
-    COVERAGE("Kapsama zayıf (düşük RSRP) — baz istasyonuna uzak / bina içi kayıp"),
-    INTERFERENCE("Girişim yüksek (düşük SINR) — komşu hücre gürültüsü"),
-    CONGESTION("Hücre yoğun (düşük RSRQ) — kaynak bloğu paylaşımı"),
-    LATENCY("Yüksek gecikme — çekirdek ağ / omurga kaynaklı"),
-    PACKET_LOSS("Paket kaybı — bağlantı kararsız"),
+    COVERAGE("Kapsama zayıf (düşük RSRP): baz istasyonuna uzak veya bina içi kayıp"),
+    INTERFERENCE("Girişim yüksek (düşük SINR): komşu hücre gürültüsü"),
+    CONGESTION("Hücre yoğun (düşük RSRQ): kaynaklar paylaşılıyor"),
+    LATENCY("Yüksek gecikme: çekirdek ağ veya omurga kaynaklı"),
+    PACKET_LOSS("Paket kaybı: bağlantı kararsız"),
 }
 
 data class QualityScore(
@@ -73,6 +110,7 @@ data class DiagnosticsSnapshot(
     val radio: RadioMetrics = RadioMetrics(),
     val latency: LatencyMetrics = LatencyMetrics(),
     val link: LinkMetrics = LinkMetrics(),
+    val cell: CellDetails = CellDetails(),
     val score: QualityScore = QualityScore(),
 )
 
@@ -83,6 +121,9 @@ enum class TunnelStatus(val label: String) {
     REFRESHING("Tazeleniyor"),
     ERROR("Hata"),
 }
+
+val TunnelStatus.isActive: Boolean
+    get() = this == TunnelStatus.RUNNING || this == TunnelStatus.STARTING || this == TunnelStatus.REFRESHING
 
 data class UpstreamStats(
     val name: String,
@@ -95,6 +136,7 @@ data class UpstreamStats(
 data class DnsTunnelState(
     val status: TunnelStatus = TunnelStatus.STOPPED,
     val mtu: Int = 0,
+    val profileTitle: String = "",
     val upstreams: List<UpstreamStats> = emptyList(),
     val totalQueries: Long = 0,
     val cacheHits: Long = 0,

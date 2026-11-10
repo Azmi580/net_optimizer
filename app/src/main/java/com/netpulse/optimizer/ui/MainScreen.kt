@@ -1,20 +1,26 @@
 package com.netpulse.optimizer.ui
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -22,49 +28,68 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.netpulse.optimizer.data.diagnostics.NetworkDiagnosticsHelper
+import com.netpulse.optimizer.domain.model.CellDetails
 import com.netpulse.optimizer.domain.model.DiagnosticsSnapshot
+import com.netpulse.optimizer.domain.model.DnsProfileId
 import com.netpulse.optimizer.domain.model.DnsTunnelState
 import com.netpulse.optimizer.domain.model.LatencyMetrics
+import com.netpulse.optimizer.domain.model.LteCellDetails
 import com.netpulse.optimizer.domain.model.QualityScore
 import com.netpulse.optimizer.domain.model.RadioMetrics
 import com.netpulse.optimizer.domain.model.RadioTechnology
 import com.netpulse.optimizer.domain.model.SignalQuality
 import com.netpulse.optimizer.domain.model.TunnelStatus
 import com.netpulse.optimizer.domain.model.UpstreamStats
+import com.netpulse.optimizer.ui.components.CellInfoCard
+import com.netpulse.optimizer.ui.components.DnsProfileCard
+import com.netpulse.optimizer.ui.components.LatencyCard
+import com.netpulse.optimizer.ui.components.RadialGauge
 import com.netpulse.optimizer.ui.theme.NetPulseTheme
 import com.netpulse.optimizer.ui.theme.QualityColors
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MainScreen(
     state: MainUiState,
+    snackbarHostState: SnackbarHostState,
     onOptimize: () -> Unit,
     onVpnToggle: (Boolean) -> Unit,
     onRequestPermissions: () -> Unit,
+    onSelectDnsProfile: (DnsProfileId) -> Unit,
+    onSaveCustomDns: (String, String) -> Unit,
 ) {
     Scaffold(
+        // Edge-to-edge: content is inset by status bar, display cutout and (via bottomBar) navigation bar.
+        contentWindowInsets = WindowInsets.safeDrawing,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             ControlBar(
-                isOptimizing = state.isOptimizing,
+                isOptimizing = state.optimization.running,
                 vpnEnabled = state.vpnEnabled,
                 tunnelStatus = state.tunnel.status,
+                profileTitle = state.dnsSettings.activeProfile.title,
                 onOptimize = onOptimize,
                 onVpnToggle = onVpnToggle,
             )
@@ -74,6 +99,8 @@ fun MainScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(inner)
+                .consumeWindowInsets(inner)
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -81,10 +108,17 @@ fun MainScreen(
             Header(state.diagnostics)
             if (!state.permissionsGranted) PermissionCard(onRequestPermissions)
             PrimaryMetrics(state.diagnostics)
+            ScoreCard(state.diagnostics.score)
             SecondaryMetrics(state.diagnostics.radio, state.diagnostics.latency)
-            QualityCard(state.diagnostics.score)
-            DnsCard(state.tunnel)
-            if (state.report.isNotEmpty()) ReportCard(state.report)
+            LatencyCard(state.diagnostics.latency, capacity = NetworkDiagnosticsHelper.WINDOW_SIZE)
+            DnsStatusCard(state.tunnel)
+            DnsProfileCard(
+                settings = state.dnsSettings,
+                onSelectProfile = onSelectDnsProfile,
+                onSaveCustom = onSaveCustomDns,
+            )
+            CellInfoCard(state.diagnostics.cell, state.diagnostics.radio)
+            if (state.optimization.steps.isNotEmpty()) ReportCard(state.optimization.steps)
             Spacer(Modifier.height(8.dp))
         }
     }
@@ -112,7 +146,7 @@ private fun PermissionCard(onRequestPermissions: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                "RSRP/RSRQ/SINR ve 5G durumu için Telefon ve Konum izni gerekli.",
+                "Sinyal değerleri, 5G durumu ve hücre bilgisi için Telefon ve Konum izni gerekli.",
                 color = MaterialTheme.colorScheme.onErrorContainer,
             )
             OutlinedButton(onClick = onRequestPermissions) { Text("İzinleri ver") }
@@ -140,31 +174,64 @@ private fun PrimaryMetrics(diagnostics: DiagnosticsSnapshot) {
                     RadioTechnology.LTE_ADVANCED, RadioTechnology.LTE -> MaterialTheme.colorScheme.primary
                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                 },
+                modifier = Modifier.weight(1f),
             )
             BigMetric(
                 label = "RSRP",
                 value = radio.rsrpDbm?.toString() ?: "—",
                 unit = "dBm",
                 color = rsrpColor(radio.rsrpDbm),
+                modifier = Modifier.weight(1f),
             )
             BigMetric(
                 label = "Ping",
                 value = latency.lastRttMs?.toString() ?: if (latency.samples > 0) "×" else "—",
                 unit = "ms",
                 color = rttColor(latency.lastRttMs),
+                modifier = Modifier.weight(1f),
             )
         }
     }
 }
 
 @Composable
-private fun BigMetric(label: String, value: String, unit: String, color: Color) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(104.dp)) {
+private fun BigMetric(label: String, value: String, unit: String, color: Color, modifier: Modifier = Modifier) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = modifier) {
         Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(4.dp))
-        Text(value, fontSize = 28.sp, fontWeight = FontWeight.Bold, color = color, textAlign = TextAlign.Center, maxLines = 1)
+        AnimatedContent(targetState = value, label = "metric-$label") { shown ->
+            Text(shown, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = color, textAlign = TextAlign.Center, maxLines = 1)
+        }
         if (unit.isNotEmpty()) {
             Text(unit, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+// ------------------------------------------------------------------ Middle
+
+@Composable
+private fun ScoreCard(score: QualityScore) {
+    Card(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                "Sinyal Kalite Skoru",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            RadialGauge(score = score.score, quality = score.quality)
+            Text(
+                "Darboğaz: ${score.bottleneck.description}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }
@@ -189,54 +256,8 @@ private fun SmallMetric(label: String, value: String, modifier: Modifier = Modif
     }
 }
 
-// ------------------------------------------------------------------ Middle
-
 @Composable
-private fun QualityCard(score: QualityScore) {
-    val target = qualityColor(score.quality)
-    val color by animateColorAsState(target, label = "qualityColor")
-    val progress by animateFloatAsState(score.score / 100f, label = "qualityProgress")
-
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Sinyal Kalite Skoru", style = MaterialTheme.typography.titleMedium)
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(
-                    if (score.quality == SignalQuality.UNKNOWN) "—" else score.score.toString(),
-                    fontSize = 44.sp,
-                    fontWeight = FontWeight.Black,
-                    color = color,
-                )
-                Text(" / 100", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.weight(1f))
-                Surface(color = color.copy(alpha = 0.16f), shape = RoundedCornerShape(50)) {
-                    Text(
-                        score.quality.label,
-                        color = color,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                    )
-                }
-            }
-            LinearProgressIndicator(
-                progress = { progress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(8.dp),
-                color = color,
-                trackColor = color.copy(alpha = 0.16f),
-            )
-            Text(
-                "Darboğaz: ${score.bottleneck.description}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun DnsCard(tunnel: DnsTunnelState) {
+private fun DnsStatusCard(tunnel: DnsTunnelState) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -244,16 +265,16 @@ private fun DnsCard(tunnel: DnsTunnelState) {
                 StatusPill(tunnel.status)
             }
             if (tunnel.status == TunnelStatus.RUNNING || tunnel.status == TunnelStatus.REFRESHING) {
-                val hitRate = if (tunnel.totalQueries > 0) (tunnel.cacheHits * 100 / tunnel.totalQueries) else 0
+                val hitRate = if (tunnel.totalQueries > 0) tunnel.cacheHits * 100 / tunnel.totalQueries else 0
                 Text(
-                    "MTU ${tunnel.mtu} · ${tunnel.totalQueries} sorgu · önbellek %$hitRate · hata ${tunnel.failures}",
+                    "${tunnel.profileTitle} · MTU ${tunnel.mtu} · ${tunnel.totalQueries} sorgu · önbellek %$hitRate · hata ${tunnel.failures}",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 HorizontalDivider()
                 tunnel.upstreams.forEach { UpstreamRow(it) }
             } else {
                 Text(
-                    tunnel.lastError ?: "Tünel kapalı: sistem operatör DNS'ini kullanıyor.",
+                    tunnel.lastError ?: "Tünel kapalı: sistem operatörün DNS sunucusunu kullanıyor.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (tunnel.lastError != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -265,17 +286,11 @@ private fun DnsCard(tunnel: DnsTunnelState) {
 @Composable
 private fun UpstreamRow(upstream: UpstreamStats) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier
-                .size(8.dp)
-                .padding(0.dp),
-        ) {
-            Surface(
-                color = if (upstream.healthy) QualityColors.Excellent else QualityColors.Weak,
-                shape = RoundedCornerShape(50),
-                modifier = Modifier.fillMaxSize(),
-            ) {}
-        }
+        Surface(
+            color = if (upstream.healthy) QualityColors.Excellent else QualityColors.Weak,
+            shape = CircleShape,
+            modifier = Modifier.size(8.dp),
+        ) {}
         Spacer(Modifier.width(8.dp))
         Text("${upstream.name} ${upstream.address}", fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
         Text(upstream.ewmaRttMs?.let { "$it ms" } ?: "—", fontFamily = FontFamily.Monospace)
@@ -319,14 +334,16 @@ private fun ControlBar(
     isOptimizing: Boolean,
     vpnEnabled: Boolean,
     tunnelStatus: TunnelStatus,
+    profileTitle: String,
     onOptimize: () -> Unit,
     onVpnToggle: (Boolean) -> Unit,
 ) {
-    Surface(tonalElevation = 3.dp) {
+    val haptics = LocalHapticFeedback.current
+    Surface(tonalElevation = 3.dp, shadowElevation = 6.dp) {
         Column(
             Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -334,19 +351,25 @@ private fun ControlBar(
                 Column(Modifier.weight(1f)) {
                     Text("DNS Tüneli (VPN)", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "Cloudflare 1.1.1.1 · 1.0.0.1 · Google 8.8.8.8",
+                        "Profil: $profileTitle",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Switch(
                     checked = vpnEnabled,
-                    onCheckedChange = onVpnToggle,
+                    onCheckedChange = { enabled ->
+                        haptics.performHapticFeedback(if (enabled) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
+                        onVpnToggle(enabled)
+                    },
                     enabled = tunnelStatus != TunnelStatus.STARTING && tunnelStatus != TunnelStatus.REFRESHING,
                 )
             }
             Button(
-                onClick = onOptimize,
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onOptimize()
+                },
                 enabled = !isOptimizing,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -371,14 +394,6 @@ private fun ControlBar(
 // ------------------------------------------------------------------ Helpers
 
 @Composable
-private fun qualityColor(quality: SignalQuality): Color = when (quality) {
-    SignalQuality.EXCELLENT -> QualityColors.Excellent
-    SignalQuality.FAIR -> QualityColors.Fair
-    SignalQuality.WEAK -> QualityColors.Weak
-    SignalQuality.UNKNOWN -> MaterialTheme.colorScheme.onSurfaceVariant
-}
-
-@Composable
 private fun rsrpColor(rsrp: Int?): Color = when {
     rsrp == null -> MaterialTheme.colorScheme.onSurfaceVariant
     rsrp >= -90 -> QualityColors.Excellent
@@ -401,13 +416,20 @@ private fun MainScreenPreview() {
         MainScreen(
             state = MainUiState(
                 diagnostics = DiagnosticsSnapshot(
-                    radio = RadioMetrics(RadioTechnology.NR_NSA, rsrpDbm = -97, rsrqDb = -11, sinrDb = 9, level = 3, operatorName = "Vodafone TR"),
-                    latency = LatencyMetrics(lastRttMs = 41, avgRttMs = 45, jitterMs = 6, lossPercent = 0, samples = 10),
-                    score = QualityScore(64, SignalQuality.FAIR),
+                    radio = RadioMetrics(RadioTechnology.NR_NSA, rsrpDbm = -97, rsrqDb = -11, sinrDb = 9, level = 3, operatorName = "Operatör"),
+                    latency = LatencyMetrics(
+                        lastRttMs = 41, avgRttMs = 45, jitterMs = 6, lossPercent = 7, samples = 15,
+                        history = listOf(48, 44, 52, 39, null, 41, 47, 60, 43, 40, 42, 55, 46, 44, 41),
+                    ),
+                    cell = CellDetails(
+                        lte = LteCellDetails("286", "02", "Operatör", 12345678, 48225, 78, 211, 41201, 1300, listOf(3)),
+                    ),
+                    score = QualityScore(72, SignalQuality.EXCELLENT),
                 ),
                 tunnel = DnsTunnelState(
                     status = TunnelStatus.RUNNING,
                     mtu = 1440,
+                    profileTitle = "Hız",
                     totalQueries = 312,
                     cacheHits = 187,
                     upstreams = listOf(
@@ -417,9 +439,12 @@ private fun MainScreenPreview() {
                     ),
                 ),
             ),
+            snackbarHostState = remember { SnackbarHostState() },
             onOptimize = {},
             onVpnToggle = {},
             onRequestPermissions = {},
+            onSelectDnsProfile = {},
+            onSaveCustomDns = { _, _ -> },
         )
     }
 }

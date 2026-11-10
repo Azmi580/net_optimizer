@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.InetAddresses
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -19,6 +20,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.netpulse.optimizer.NetPulseApp
 import com.netpulse.optimizer.R
+import com.netpulse.optimizer.domain.model.DnsProfile
 import com.netpulse.optimizer.domain.model.TunnelStatus
 import com.netpulse.optimizer.ui.MainActivity
 import com.netpulse.optimizer.vpn.dns.DnsCache
@@ -40,7 +42,9 @@ import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -51,7 +55,6 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.DatagramSocket
-import java.net.InetAddress
 import java.net.Socket
 import java.util.concurrent.atomic.AtomicLong
 
@@ -62,12 +65,13 @@ import java.util.concurrent.atomic.AtomicLong
  * (10.111.222.2 / .3) into the tunnel. The OS resolver is told to use those addresses, so every
  * app's DNS lookup enters the TUN while all other traffic keeps its normal, zero-overhead path
  * on the physical network. Queries are answered from a TTL cache or forwarded through a protected,
- * hedged socket pool to Cloudflare (1.1.1.1, 1.0.0.1) and Google (8.8.8.8).
+ * hedged socket pool to the resolvers of the user-selected DNS profile (switchable while running).
  */
 class LocalDnsVpnService : VpnService() {
 
     private val container get() = (application as NetPulseApp).container
     private val repository get() = container.vpnStateRepository
+    private val dnsSettings get() = container.dnsSettingsRepository
 
     private val serviceScope = CoroutineScope(
         SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, t -> Log.e(TAG, "Unhandled tunnel error", t) },
@@ -83,6 +87,7 @@ class LocalDnsVpnService : VpnService() {
     @Volatile private var pool: DnsUpstreamPool? = null
     private var statsJob: Job? = null
     private var networkJob: Job? = null
+    private var settingsJob: Job? = null
 
     private class ActiveTunnel(val pfd: ParcelFileDescriptor, val mtu: Int, val loop: Job)
 
@@ -120,6 +125,7 @@ class LocalDnsVpnService : VpnService() {
     override fun onDestroy() {
         statsJob?.cancel()
         networkJob?.cancel()
+        settingsJob?.cancel()
         tunnel?.let { runCatching { it.pfd.close() } }
         tunnel = null
         pool?.close()
@@ -136,9 +142,12 @@ class LocalDnsVpnService : VpnService() {
                 failLocked("VPN izni verilmedi")
                 return
             }
-            repository.update { it.copy(status = TunnelStatus.STARTING, lastError = null) }
+            val profile = dnsSettings.settings.value.activeProfile
+            repository.update {
+                it.copy(status = TunnelStatus.STARTING, lastError = null, profileTitle = profile.title)
+            }
 
-            val newPool = DnsUpstreamPool(protector, UPSTREAMS, serviceScope)
+            val newPool = DnsUpstreamPool(protector, upstreamsFor(profile), serviceScope)
             newPool.start()
             pool = newPool
 
@@ -150,6 +159,15 @@ class LocalDnsVpnService : VpnService() {
             newPool.warmUp()
             startStatsTicker()
             observeUnderlyingNetwork()
+            observeDnsProfile()
+        }
+    }
+
+    private fun upstreamsFor(profile: DnsProfile): List<DnsUpstream> = profile.servers.mapNotNull { server ->
+        try {
+            DnsUpstream(server.name, InetAddresses.parseNumericAddress(server.address))
+        } catch (_: IllegalArgumentException) {
+            null
         }
     }
 
@@ -180,6 +198,8 @@ class LocalDnsVpnService : VpnService() {
         statsJob = null
         networkJob?.cancel()
         networkJob = null
+        settingsJob?.cancel()
+        settingsJob = null
         tunnel?.let {
             it.loop.cancel()
             runCatching { it.pfd.close() }
@@ -398,6 +418,31 @@ class LocalDnsVpnService : VpnService() {
         }
     }
 
+    /** Profile switch while running: swap the upstream pool in place; the TUN stays up (no DNS gap). */
+    private fun observeDnsProfile() {
+        settingsJob?.cancel()
+        settingsJob = serviceScope.launch {
+            dnsSettings.settings
+                .map { it.activeProfile }
+                .distinctUntilChanged()
+                .drop(1)
+                .collect { profile ->
+                    lifecycleMutex.withLock {
+                        val current = tunnel ?: return@withLock
+                        val replacement = DnsUpstreamPool(protector, upstreamsFor(profile), serviceScope)
+                        replacement.start()
+                        val old = pool
+                        pool = replacement
+                        old?.close()
+                        cache.clear()
+                        replacement.warmUp()
+                        repository.update { it.copy(profileTitle = profile.title) }
+                        updateNotification(current.mtu)
+                    }
+                }
+        }
+    }
+
     // ------------------------------------------------------------------ Notification
 
     private fun promoteToForeground(mtu: Int) {
@@ -436,7 +481,8 @@ class LocalDnsVpnService : VpnService() {
             Intent(this, LocalDnsVpnService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val text = if (mtu > 0) "Cloudflare + Google DNS · MTU $mtu" else "Tünel hazırlanıyor…"
+        val profile = dnsSettings.settings.value.activeProfile
+        val text = if (mtu > 0) "${profile.title} profili · ${profile.servers.first().address} · MTU $mtu" else "Tünel hazırlanıyor…"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_tunnel)
             .setContentTitle(getString(R.string.notification_title))
@@ -479,17 +525,26 @@ class LocalDnsVpnService : VpnService() {
         private const val CHANNEL_ID = "dns_tunnel"
         private const val NOTIFICATION_ID = 1001
 
-        val UPSTREAMS: List<DnsUpstream> = listOf(
-            DnsUpstream("Cloudflare", InetAddress.getByAddress(byteArrayOf(1, 1, 1, 1))),
-            DnsUpstream("Cloudflare", InetAddress.getByAddress(byteArrayOf(1, 0, 0, 1))),
-            DnsUpstream("Google", InetAddress.getByAddress(byteArrayOf(8, 8, 8, 8))),
-        )
-
         fun start(context: Context) {
+            tryStart(context)
+        }
+
+        /**
+         * Returns false when the platform refuses a foreground-service start (e.g. from a background
+         * context on Android 12+), so callers such as the Quick Settings tile can fall back to the UI.
+         */
+        fun tryStart(context: Context): Boolean = try {
             ContextCompat.startForegroundService(
                 context,
                 Intent(context, LocalDnsVpnService::class.java).setAction(ACTION_START),
             )
+            true
+        } catch (e: IllegalStateException) {
+            Log.w(TAG, "Foreground service start refused", e)
+            false
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Foreground service start refused", e)
+            false
         }
 
         fun stop(context: Context) {

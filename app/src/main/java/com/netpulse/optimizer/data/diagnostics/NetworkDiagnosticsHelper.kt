@@ -44,7 +44,8 @@ import kotlin.math.abs
  * Reactive radio + latency probe.
  *
  * - Radio: [TelephonyCallback] (SignalStrengthsListener + DisplayInfoListener) — event driven, no polling.
- *   Samsung Exynos modems sometimes omit RSRQ/SINR from SignalStrength, so CellInfo is used as fallback.
+ *   Some modems omit RSRQ/SINR from SignalStrength, so CellInfo is used as a fallback (AOSP API only).
+ * - Cell identity: [CellIdentityReader] (eNodeB/gNodeB, PCI, TAC, band).
  * - Latency: TCP handshake RTT to anycast resolvers (1.1.1.1 / 8.8.8.8 :443). A SYN/SYN‑ACK round trip is
  *   equivalent to ICMP echo RTT but needs no raw socket / root.
  *
@@ -54,13 +55,25 @@ class NetworkDiagnosticsHelper(
     private val context: Context,
     private val connectivityMonitor: ConnectivityMonitor,
     private val scorer: SignalScorer,
+    private val cellIdentityReader: CellIdentityReader,
 ) {
 
     private val telephony: TelephonyManager = context.getSystemService(TelephonyManager::class.java)
 
     fun diagnostics(pingIntervalMs: Long = DEFAULT_PING_INTERVAL_MS): Flow<DiagnosticsSnapshot> =
-        combine(radioMetrics(), latency(pingIntervalMs), connectivityMonitor.linkState) { radio, latency, link ->
-            DiagnosticsSnapshot(radio = radio, latency = latency, link = link, score = scorer.score(radio, latency))
+        combine(
+            radioMetrics(),
+            latency(pingIntervalMs),
+            connectivityMonitor.linkState,
+            cellIdentityReader.cellDetails(),
+        ) { radio, latency, link, cell ->
+            DiagnosticsSnapshot(
+                radio = radio,
+                latency = latency,
+                link = link,
+                cell = cell,
+                score = scorer.score(radio, latency),
+            )
         }.conflate()
 
     // ---------------------------------------------------------------- Radio
@@ -206,7 +219,16 @@ class NetworkDiagnosticsHelper(
             val jitter = if (ok.size < 2) null else ok.zipWithNext { a, b -> abs(a - b) }.average().toLong()
             val loss = ((window.size - ok.size) * 100) / window.size
 
-            emit(LatencyMetrics(lastRttMs = rtt, avgRttMs = avg, jitterMs = jitter, lossPercent = loss, samples = window.size))
+            emit(
+                LatencyMetrics(
+                    lastRttMs = rtt,
+                    avgRttMs = avg,
+                    jitterMs = jitter,
+                    lossPercent = loss,
+                    samples = window.size,
+                    history = window.toList(),
+                ),
+            )
             delay(intervalMs)
         }
     }.flowOn(Dispatchers.IO)
@@ -238,7 +260,9 @@ class NetworkDiagnosticsHelper(
 
     companion object {
         const val DEFAULT_PING_INTERVAL_MS = 2_000L
-        private const val WINDOW_SIZE = 10
+
+        /** 15 samples × 2 s = the 30-second window shown in the sparkline. */
+        const val WINDOW_SIZE = 15
         private const val PING_PORT = 443
         private const val PING_TIMEOUT_MS = 1_500
 

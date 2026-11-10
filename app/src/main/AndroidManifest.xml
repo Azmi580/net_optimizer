@@ -5,16 +5,20 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Radio diagnostics: TelephonyDisplayInfo / data network type need READ_PHONE_STATE,
-         CellInfo fallback (RSRQ/SINR on some Samsung modems) needs fine location. -->
+    <!-- Radio diagnostics (standard AOSP APIs only):
+         READ_PHONE_STATE  -> TelephonyDisplayInfo / data network type (5G NSA vs SA)
+         ACCESS_FINE_LOCATION -> CellInfo / CellIdentity (eNodeB/gNodeB, PCI, band) -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
-    <!-- Foreground service for the DNS tunnel (Android 14+ requires a typed FGS permission). -->
+    <!-- Foreground service for the DNS tunnel; Android 14+ requires a typed FGS permission. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Haptic feedback on optimise / tunnel toggle. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <uses-feature
         android:name="android.hardware.telephony"
@@ -23,9 +27,10 @@
     <application
         android:name=".NetPulseApp"
         android:allowBackup="false"
+        android:enableOnBackInvokedCallback="true"
         android:icon="@drawable/ic_launcher"
-        android:roundIcon="@drawable/ic_launcher"
         android:label="@string/app_name"
+        android:roundIcon="@drawable/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.NetPulse">
 
@@ -33,7 +38,7 @@
             android:name=".ui.MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:theme="@style/Theme.NetPulse">
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -53,7 +58,21 @@
                 android:value="true" />
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Local DNS-only VpnService tunnel forwarding resolver queries to encrypted-capable public resolvers with latency hedging" />
+                android:value="Local DNS-only VpnService tunnel forwarding resolver queries to user-selected public resolvers with latency hedging" />
+        </service>
+
+        <service
+            android:name=".tile.DnsTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_stat_tunnel"
+            android:label="@string/tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="true" />
         </service>
     </application>
 </manifest>

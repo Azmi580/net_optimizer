@@ -42,7 +42,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/android-sdk
-          key: android-sdk-35-v1
+          key: android-sdk-36-v1
 
       # A stable debug keystore lets every new build install *over* the previous one on the phone
       # (otherwise each runner generates a new key and Android rejects the update signature).
@@ -67,13 +67,16 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.11.1"
+          gradle-version: "8.14.3"
 
       - name: Assemble debug APK
         run: gradle :app:assembleDebug --stacktrace --no-daemon
 
       - name: Collect APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk ./app-debug.apk
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk ./app-debug.apk
+          VERSION=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -86,11 +89,9 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: NetPulse Debug #${{ github.run_number }}
+          tag_name: v${{ env.APP_VERSION }}-build.${{ github.run_number }}
+          name: NetPulse v${{ env.APP_VERSION }} (build ${{ github.run_number }})
           target_commitish: ${{ github.sha }}
           make_latest: "true"
           files: app-debug.apk
-          body: |
-            Otomatik debug derlemesi — commit `${{ github.sha }}` (${{ github.ref_name }}).
-            Telefonda: app-debug.apk dosyasına dokunun → "Bilinmeyen uygulamalara izin ver" → Yükle.
+          body_path: docs/RELEASE_NOTES.md
