@@ -40,9 +40,7 @@ flowchart LR
 - **Hedging:** önce en hızlı sunucu sorgulanır. EWMA RTT'nin 1,5 katı içinde yanıt gelmezse diğerleri de yarışa katılır,
   ilk geçerli yanıt kazanır. Paket kaybından kaynaklanan uzun takılmalar böylece kesilir.
 - **Kalıcı soketler:** her sorgu için yeni soket açılmaz. Rastgele transaction-id ile çoğullama yapılır.
-- **Boştayken sıfır uyanma:** TUN döngüsü `poll(-1)` ile çekirdekte bekler (zamanlayıcı yok). Kapatma sinyali bir self-pipe üzerinden gelir.
-- **Pil:** ölçümler sadece uygulama görünürken (`ON_START`…`ON_STOP`) veya Hızlı Ayarlar paneli açıkken çalışır. Tünel sayaçları da sadece biri izlerken yayınlanır.
-- **Kesintisiz:** uygulama son uygulamalardan kapatılsa bile tünel bağımsız foreground servis olarak çalışır.
+- **Pil:** ölçümler sadece ekran açıkken veya Hızlı Ayarlar paneli açıkken çalışır. Telefon sinyali olay tabanlı okunur, sürekli sorgulanmaz.
 
 ## Sinyal parametreleri
 

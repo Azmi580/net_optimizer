@@ -31,8 +31,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
@@ -81,23 +79,9 @@ class MainViewModel(
     private val events = Channel<MainEvent>(Channel.BUFFERED)
     val eventFlow: Flow<MainEvent> = events.receiveAsFlow()
 
-    /**
-     * True only between Activity ON_START and ON_STOP. While false, TelephonyCallback, cell polling and
-     * the ping loop are fully unregistered/cancelled (not just un-collected) and the last snapshot is held,
-     * so the background cost is zero and the screen does not flash empty on return.
-     */
-    private val uiVisible = MutableStateFlow(false)
-    @Volatile private var lastSnapshot = DiagnosticsSnapshot()
-
-    private val diagnostics: Flow<DiagnosticsSnapshot> = combine(permissionEpoch, uiVisible) { _, visible -> visible }
-        .flatMapLatest { visible ->
-            if (visible) {
-                diagnosticsHelper.diagnostics().onEach { lastSnapshot = it }
-            } else {
-                flowOf(lastSnapshot)
-            }
-        }
-        .onStart { emit(lastSnapshot) }
+    private val diagnostics: Flow<DiagnosticsSnapshot> = permissionEpoch
+        .flatMapLatest { diagnosticsHelper.diagnostics() }
+        .onStart { emit(DiagnosticsSnapshot()) }
 
     val uiState: StateFlow<MainUiState> = combine(
         diagnostics,
@@ -108,12 +92,6 @@ class MainViewModel(
     ) { diag, tunnel, opt, granted, dns ->
         MainUiState(diag, tunnel, opt, granted, dns)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainUiState())
-
-    // ------------------------------------------------------------------ Lifecycle
-
-    fun setUiVisible(visible: Boolean) {
-        uiVisible.value = visible
-    }
 
     // ------------------------------------------------------------------ Permissions
 

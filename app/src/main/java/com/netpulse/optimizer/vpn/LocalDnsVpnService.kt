@@ -41,7 +41,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
@@ -52,13 +51,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.io.FileDescriptor
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.DatagramSocket
 import java.net.Socket
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -92,40 +89,7 @@ class LocalDnsVpnService : VpnService() {
     private var networkJob: Job? = null
     private var settingsJob: Job? = null
 
-    private class ActiveTunnel(val pfd: ParcelFileDescriptor, val mtu: Int, val loop: Job, val wake: WakePipe) {
-        /** Unblocks the infinite poll(), stops the loop and releases the TUN fd. */
-        fun close() {
-            wake.signal()
-            loop.cancel()
-            runCatching { pfd.close() }
-        }
-    }
-
-    /**
-     * Self-pipe used to wake the packet loop. Lets poll() block with an *infinite* timeout, so an idle
-     * tunnel causes zero CPU wake-ups instead of polling on a timer.
-     */
-    private class WakePipe {
-        private val fds: Array<FileDescriptor> = Os.pipe()
-        private val closed = AtomicBoolean(false)
-        val readFd: FileDescriptor get() = fds[0]
-
-        fun signal() {
-            if (closed.get()) return
-            try {
-                Os.write(fds[1], byteArrayOf(1), 0, 1)
-            } catch (_: ErrnoException) {
-            } catch (_: IOException) {
-            }
-        }
-
-        fun close() {
-            if (closed.compareAndSet(false, true)) {
-                runCatching { Os.close(fds[0]) }
-                runCatching { Os.close(fds[1]) }
-            }
-        }
-    }
+    private class ActiveTunnel(val pfd: ParcelFileDescriptor, val mtu: Int, val loop: Job)
 
     private val protector = object : SocketProtector {
         override fun protect(socket: DatagramSocket): Boolean = this@LocalDnsVpnService.protect(socket)
@@ -158,20 +122,11 @@ class LocalDnsVpnService : VpnService() {
         serviceScope.launch { shutdown() }
     }
 
-    /**
-     * Swiping the app away from Recents only removes the UI task. The tunnel lives in this
-     * independent foreground service (stopWithTask=false), so it re-asserts foreground state and keeps running.
-     */
-    override fun onTaskRemoved(rootIntent: Intent?) {
-        tunnel?.let { promoteToForeground(it.mtu) }
-        super.onTaskRemoved(rootIntent)
-    }
-
     override fun onDestroy() {
         statsJob?.cancel()
         networkJob?.cancel()
         settingsJob?.cancel()
-        tunnel?.close()
+        tunnel?.let { runCatching { it.pfd.close() } }
         tunnel = null
         pool?.close()
         pool = null
@@ -245,7 +200,10 @@ class LocalDnsVpnService : VpnService() {
         networkJob = null
         settingsJob?.cancel()
         settingsJob = null
-        tunnel?.close()
+        tunnel?.let {
+            it.loop.cancel()
+            runCatching { it.pfd.close() }
+        }
         tunnel = null
         pool?.close()
         pool = null
@@ -296,10 +254,12 @@ class LocalDnsVpnService : VpnService() {
         }
 
         val previous = tunnel
-        val wake = WakePipe()
-        val loop = serviceScope.launch { runPacketLoop(pfd, mtu, wake) }
-        tunnel = ActiveTunnel(pfd, mtu, loop, wake)
-        previous?.close()
+        val loop = serviceScope.launch { runPacketLoop(pfd, mtu) }
+        tunnel = ActiveTunnel(pfd, mtu, loop)
+        previous?.let {
+            it.loop.cancel()
+            runCatching { it.pfd.close() }
+        }
 
         repository.update {
             it.copy(status = TunnelStatus.RUNNING, mtu = mtu, lastError = null, tunnelGeneration = it.tunnelGeneration + 1)
@@ -308,7 +268,7 @@ class LocalDnsVpnService : VpnService() {
         return true
     }
 
-    private suspend fun runPacketLoop(pfd: ParcelFileDescriptor, mtu: Int, wake: WakePipe) = coroutineScope {
+    private suspend fun runPacketLoop(pfd: ParcelFileDescriptor, mtu: Int) = coroutineScope {
         val tunFd = pfd.fileDescriptor
         val input = FileInputStream(tunFd)
         val output = FileOutputStream(tunFd)
@@ -326,30 +286,21 @@ class LocalDnsVpnService : VpnService() {
 
         val inflight = Semaphore(MAX_INFLIGHT_QUERIES)
         val buffer = ByteArray(MAX_PACKET_SIZE)
-        val tunPoll = StructPollfd().apply {
+        val pollFds = arrayOf(StructPollfd().apply {
             fd = tunFd
             events = OsConstants.POLLIN.toShort()
-        }
-        val wakePoll = StructPollfd().apply {
-            fd = wake.readFd
-            events = OsConstants.POLLIN.toShort()
-        }
-        val pollFds = arrayOf(tunPoll, wakePoll)
-        val errorMask = OsConstants.POLLERR or OsConstants.POLLHUP or OsConstants.POLLNVAL
+        })
 
         try {
             while (isActive) {
-                // Infinite timeout: the thread sleeps in the kernel until a DNS packet or a wake signal arrives.
                 val ready = try {
-                    Os.poll(pollFds, -1)
+                    Os.poll(pollFds, POLL_TIMEOUT_MS)
                 } catch (e: ErrnoException) {
                     if (e.errno == OsConstants.EINTR) continue else break
                 }
                 if (ready <= 0) continue
-                if (wakePoll.revents.toInt() != 0) break
-                val revents = tunPoll.revents.toInt()
-                if ((revents and errorMask) != 0) break
-                if ((revents and OsConstants.POLLIN) == 0) continue
+                val revents = pollFds[0].revents.toInt()
+                if ((revents and (OsConstants.POLLERR or OsConstants.POLLHUP or OsConstants.POLLNVAL)) != 0) break
 
                 val length = try {
                     input.read(buffer)
@@ -376,7 +327,6 @@ class LocalDnsVpnService : VpnService() {
         } finally {
             outbound.close()
             writer.cancel()
-            wake.close()
         }
     }
 
@@ -432,29 +382,20 @@ class LocalDnsVpnService : VpnService() {
 
     // ------------------------------------------------------------------ Observers
 
-    /**
-     * Publishes counters once per second, but only while someone (UI or QS tile) observes the state.
-     * With the app in the background nothing subscribes, so this costs zero wake-ups.
-     */
     private fun startStatsTicker() {
         statsJob?.cancel()
         statsJob = serviceScope.launch {
-            repository.observerCount
-                .map { it > 0 }
-                .distinctUntilChanged()
-                .collectLatest { observed ->
-                    while (observed) {
-                        repository.update {
-                            it.copy(
-                                totalQueries = totalQueries.get(),
-                                cacheHits = cacheHits.get(),
-                                failures = failures.get(),
-                                upstreams = pool?.stats() ?: emptyList(),
-                            )
-                        }
-                        delay(STATS_INTERVAL_MS)
-                    }
+            while (isActive) {
+                repository.update {
+                    it.copy(
+                        totalQueries = totalQueries.get(),
+                        cacheHits = cacheHits.get(),
+                        failures = failures.get(),
+                        upstreams = pool?.stats() ?: emptyList(),
+                    )
                 }
+                delay(STATS_INTERVAL_MS)
+            }
         }
     }
 
@@ -577,6 +518,7 @@ class LocalDnsVpnService : VpnService() {
         private const val MAX_PACKET_SIZE = 32_767
         private const val OUTBOUND_QUEUE = 1_024
         private const val MAX_INFLIGHT_QUERIES = 128
+        private const val POLL_TIMEOUT_MS = 500
         private const val STATS_INTERVAL_MS = 1_000L
         private const val NETWORK_DEBOUNCE_MS = 800L
 
