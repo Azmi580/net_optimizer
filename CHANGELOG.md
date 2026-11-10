@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.2.0]
+
+### Eklenenler
+- `onTaskRemoved` ve `stopWithTask=false`: uygulama son uygulamalardan kapatılsa da tünel çalışmaya devam eder.
+- Kendini uyandıran boru (`WakePipe`): TUN döngüsü `poll(-1)` ile süresiz bekler. Boştayken CPU uyanması sıfır.
+- Arayüz görünürlüğüne bağlı teşhis: `ON_STOP` anında TelephonyCallback, CellInfo sorgusu ve ping kapanır, `ON_START`'ta yeniden açılır.
+- `VpnStateRepository.observerCount`: servis sayaçları yalnızca izleyen varken yayınlanır.
+- `Type.kt`: tabular rakamlı (`tnum`) tipografi ölçeği. `Glass.kt`: cam kart ve ortam ışığı arka planı. `OptimizeButton.kt`: parıltılı, dalga efektli hap buton.
+
+### Değişenler
+- `RadialGauge`: sweep-gradient yay, BlurMaskFilter parıltısı, `Animatable` ile kesintisiz animasyon, çentikler ve uç noktası.
+- `LatencySparkline`: Bézier eğriler, degrade dolgu, sola akan kaydırma, yumuşak dikey ölçek.
+- Koyu tema: #000000 taban ve lacivert/füme yüzey katmanları.
+- Alt "DNS Tüneli" paneli kaldırıldı; tünel anahtarı Güvenli DNS kartında.
+
 ## [1.1.0]
 
 ### Eklenenler

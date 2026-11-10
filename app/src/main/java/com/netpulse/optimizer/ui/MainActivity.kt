@@ -13,6 +13,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.netpulse.optimizer.NetPulseApp
 import com.netpulse.optimizer.ui.theme.NetPulseTheme
@@ -69,6 +71,12 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+
+        // Diagnostics run only while the UI is actually visible; ON_STOP puts them to sleep immediately.
+        lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) = viewModel.setUiVisible(true)
+            override fun onStop(owner: LifecycleOwner) = viewModel.setUiVisible(false)
+        })
 
         if (savedInstanceState == null) {
             if (!MainViewModel.hasCorePermissions(this)) {

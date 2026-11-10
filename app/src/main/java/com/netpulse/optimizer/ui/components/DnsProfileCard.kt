@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.Card
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -46,12 +45,13 @@ fun DnsProfileCard(
     var secondary by rememberSaveable(settings.customServers) { mutableStateOf(settings.customServers.getOrElse(1) { "" }) }
     val focusManager = LocalFocusManager.current
 
-    Card(modifier.fillMaxWidth()) {
-        Column(Modifier.padding(vertical = 12.dp)) {
+    GlassCard(modifier.fillMaxWidth()) {
+        Column(Modifier.padding(vertical = 14.dp)) {
             Text(
-                "DNS Profili",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                "DNS PROFİLİ",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 18.dp, vertical = 4.dp),
             )
             Column(Modifier.selectableGroup()) {
                 DnsProfiles.presets.forEach { profile ->

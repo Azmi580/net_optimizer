@@ -18,7 +18,7 @@ android {
         targetSdk = 36
         // versionCode must grow monotonically for in-place updates; CI run number does that.
         versionCode = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
-        versionName = "1.1.0"
+        versionName = "1.2.0"
     }
 
     buildTypes {

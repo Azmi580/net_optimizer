@@ -1,7 +1,15 @@
 package com.netpulse.optimizer.ui
 
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
@@ -23,10 +31,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -40,15 +44,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.netpulse.optimizer.data.diagnostics.NetworkDiagnosticsHelper
 import com.netpulse.optimizer.domain.model.CellDetails
 import com.netpulse.optimizer.domain.model.DiagnosticsSnapshot
@@ -62,10 +65,15 @@ import com.netpulse.optimizer.domain.model.RadioTechnology
 import com.netpulse.optimizer.domain.model.SignalQuality
 import com.netpulse.optimizer.domain.model.TunnelStatus
 import com.netpulse.optimizer.domain.model.UpstreamStats
+import com.netpulse.optimizer.ui.components.AmbientBackground
 import com.netpulse.optimizer.ui.components.CellInfoCard
 import com.netpulse.optimizer.ui.components.DnsProfileCard
+import com.netpulse.optimizer.ui.components.GlassCard
 import com.netpulse.optimizer.ui.components.LatencyCard
+import com.netpulse.optimizer.ui.components.OptimizeButton
 import com.netpulse.optimizer.ui.components.RadialGauge
+import com.netpulse.optimizer.ui.theme.LocalGlass
+import com.netpulse.optimizer.ui.theme.MetricText
 import com.netpulse.optimizer.ui.theme.NetPulseTheme
 import com.netpulse.optimizer.ui.theme.QualityColors
 
@@ -80,46 +88,48 @@ fun MainScreen(
     onSelectDnsProfile: (DnsProfileId) -> Unit,
     onSaveCustomDns: (String, String) -> Unit,
 ) {
-    Scaffold(
-        // Edge-to-edge: content is inset by status bar, display cutout and (via bottomBar) navigation bar.
-        contentWindowInsets = WindowInsets.safeDrawing,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        bottomBar = {
-            ControlBar(
-                isOptimizing = state.optimization.running,
-                vpnEnabled = state.vpnEnabled,
-                tunnelStatus = state.tunnel.status,
-                profileTitle = state.dnsSettings.activeProfile.title,
-                onOptimize = onOptimize,
-                onVpnToggle = onVpnToggle,
-            )
-        },
-    ) { inner ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(inner)
-                .consumeWindowInsets(inner)
-                .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Header(state.diagnostics)
-            if (!state.permissionsGranted) PermissionCard(onRequestPermissions)
-            PrimaryMetrics(state.diagnostics)
-            ScoreCard(state.diagnostics.score)
-            SecondaryMetrics(state.diagnostics.radio, state.diagnostics.latency)
-            LatencyCard(state.diagnostics.latency, capacity = NetworkDiagnosticsHelper.WINDOW_SIZE)
-            DnsStatusCard(state.tunnel)
-            DnsProfileCard(
-                settings = state.dnsSettings,
-                onSelectProfile = onSelectDnsProfile,
-                onSaveCustom = onSaveCustomDns,
-            )
-            CellInfoCard(state.diagnostics.cell, state.diagnostics.radio)
-            if (state.optimization.steps.isNotEmpty()) ReportCard(state.optimization.steps)
-            Spacer(Modifier.height(8.dp))
+    AmbientBackground(Modifier.background(MaterialTheme.colorScheme.background)) {
+        Scaffold(
+            containerColor = Color.Transparent,
+            // Edge-to-edge: inset by status bar, display cutout and (via bottomBar) navigation bar.
+            contentWindowInsets = WindowInsets.safeDrawing,
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            bottomBar = { ActionBar(running = state.optimization.running, onOptimize = onOptimize) },
+        ) { inner ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(inner)
+                    .consumeWindowInsets(inner)
+                    .imePadding()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                Header(state.diagnostics, state.tunnel.status)
+                AnimatedVisibility(!state.permissionsGranted) { PermissionCard(onRequestPermissions) }
+                PrimaryMetrics(state.diagnostics)
+                ScoreCard(state.diagnostics.score)
+                SecondaryMetrics(state.diagnostics.radio, state.diagnostics.latency)
+                LatencyCard(
+                    latency = state.diagnostics.latency,
+                    capacity = NetworkDiagnosticsHelper.WINDOW_SIZE,
+                    sampleIntervalMs = NetworkDiagnosticsHelper.DEFAULT_PING_INTERVAL_MS,
+                )
+                DnsCard(state.tunnel, state.vpnEnabled, onVpnToggle)
+                DnsProfileCard(
+                    settings = state.dnsSettings,
+                    onSelectProfile = onSelectDnsProfile,
+                    onSaveCustom = onSaveCustomDns,
+                )
+                CellInfoCard(state.diagnostics.cell, state.diagnostics.radio)
+                AnimatedVisibility(
+                    visible = state.optimization.steps.isNotEmpty(),
+                    enter = fadeIn() + slideInVertically { it / 3 },
+                    exit = fadeOut() + slideOutVertically { it / 3 },
+                ) { ReportCard(state.optimization.steps) }
+                Spacer(Modifier.height(8.dp))
+            }
         }
     }
 }
@@ -127,27 +137,29 @@ fun MainScreen(
 // ------------------------------------------------------------------ Top
 
 @Composable
-private fun Header(diagnostics: DiagnosticsSnapshot) {
-    Column {
-        Text("NetPulse", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-        val operator = diagnostics.radio.operatorName ?: "Operatör"
-        val link = diagnostics.link
-        val validated = if (link.validated) "doğrulandı" else "doğrulanmadı"
-        Text(
-            "$operator · ${link.transport.label} · $validated",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+private fun Header(diagnostics: DiagnosticsSnapshot, status: TunnelStatus) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("NetPulse", style = MaterialTheme.typography.headlineMedium)
+            val operator = diagnostics.radio.operatorName ?: "Operatör"
+            val link = diagnostics.link
+            Text(
+                "$operator · ${link.transport.label}${if (link.validated) "" else " · doğrulanmadı"}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        StatusPill(status)
     }
 }
 
 @Composable
 private fun PermissionCard(onRequestPermissions: () -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    GlassCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(
                 "Sinyal değerleri, 5G durumu ve hücre bilgisi için Telefon ve Konum izni gerekli.",
-                color = MaterialTheme.colorScheme.onErrorContainer,
+                style = MaterialTheme.typography.bodyMedium,
             )
             OutlinedButton(onClick = onRequestPermissions) { Text("İzinleri ver") }
         }
@@ -158,7 +170,7 @@ private fun PermissionCard(onRequestPermissions: () -> Unit) {
 private fun PrimaryMetrics(diagnostics: DiagnosticsSnapshot) {
     val radio = diagnostics.radio
     val latency = diagnostics.latency
-    Card(Modifier.fillMaxWidth()) {
+    GlassCard(Modifier.fillMaxWidth()) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -166,7 +178,7 @@ private fun PrimaryMetrics(diagnostics: DiagnosticsSnapshot) {
             horizontalArrangement = Arrangement.SpaceEvenly,
         ) {
             BigMetric(
-                label = "Ağ Türü",
+                label = "AĞ",
                 value = radio.technology.label,
                 unit = "",
                 color = when (radio.technology) {
@@ -184,7 +196,7 @@ private fun PrimaryMetrics(diagnostics: DiagnosticsSnapshot) {
                 modifier = Modifier.weight(1f),
             )
             BigMetric(
-                label = "Ping",
+                label = "PING",
                 value = latency.lastRttMs?.toString() ?: if (latency.samples > 0) "×" else "—",
                 unit = "ms",
                 color = rttColor(latency.lastRttMs),
@@ -197,10 +209,16 @@ private fun PrimaryMetrics(diagnostics: DiagnosticsSnapshot) {
 @Composable
 private fun BigMetric(label: String, value: String, unit: String, color: Color, modifier: Modifier = Modifier) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = modifier) {
-        Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(4.dp))
-        AnimatedContent(targetState = value, label = "metric-$label") { shown ->
-            Text(shown, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = color, textAlign = TextAlign.Center, maxLines = 1)
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(6.dp))
+        AnimatedContent(
+            targetState = value,
+            transitionSpec = {
+                (fadeIn() + slideInVertically { it / 2 }) togetherWith (fadeOut() + slideOutVertically { -it / 2 })
+            },
+            label = "metric-$label",
+        ) { shown ->
+            Text(shown, style = MetricText.large, color = color, textAlign = TextAlign.Center, maxLines = 1)
         }
         if (unit.isNotEmpty()) {
             Text(unit, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -212,22 +230,23 @@ private fun BigMetric(label: String, value: String, unit: String, color: Color, 
 
 @Composable
 private fun ScoreCard(score: QualityScore) {
-    Card(Modifier.fillMaxWidth()) {
+    GlassCard(Modifier.fillMaxWidth()) {
         Column(
             Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
+                .padding(18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                "Sinyal Kalite Skoru",
-                style = MaterialTheme.typography.titleMedium,
+                "SİNYAL KALİTE SKORU",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.fillMaxWidth(),
             )
             RadialGauge(score = score.score, quality = score.quality)
             Text(
-                "Darboğaz: ${score.bottleneck.description}",
+                score.bottleneck.description,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -241,36 +260,59 @@ private fun SecondaryMetrics(radio: RadioMetrics, latency: LatencyMetrics) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         SmallMetric("RSRQ", radio.rsrqDb?.let { "$it dB" } ?: "—", Modifier.weight(1f))
         SmallMetric("SINR", radio.sinrDb?.let { "$it dB" } ?: "—", Modifier.weight(1f))
-        SmallMetric("Jitter", latency.jitterMs?.let { "$it ms" } ?: "—", Modifier.weight(1f))
-        SmallMetric("Kayıp", "%${latency.lossPercent}", Modifier.weight(1f))
+        SmallMetric("JITTER", latency.jitterMs?.let { "$it ms" } ?: "—", Modifier.weight(1f))
+        SmallMetric("KAYIP", "%${latency.lossPercent}", Modifier.weight(1f))
     }
 }
 
 @Composable
 private fun SmallMetric(label: String, value: String, modifier: Modifier = Modifier) {
-    Surface(modifier = modifier, shape = RoundedCornerShape(12.dp), tonalElevation = 2.dp) {
-        Column(Modifier.padding(vertical = 10.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    GlassCard(modifier) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
             Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(value, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, maxLines = 1)
+            Spacer(Modifier.height(2.dp))
+            Text(value, style = MetricText.medium, maxLines = 1)
         }
     }
 }
 
+/** DNS status + the tunnel switch (moved here from the old bottom bar). */
 @Composable
-private fun DnsStatusCard(tunnel: DnsTunnelState) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun DnsCard(tunnel: DnsTunnelState, vpnEnabled: Boolean, onVpnToggle: (Boolean) -> Unit) {
+    val haptics = LocalHapticFeedback.current
+    GlassCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Güvenli DNS", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                StatusPill(tunnel.status)
+                Column(Modifier.weight(1f)) {
+                    Text("GÜVENLİ DNS", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        if (vpnEnabled && tunnel.profileTitle.isNotEmpty()) "${tunnel.profileTitle} profili" else tunnel.status.label,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                Switch(
+                    checked = vpnEnabled,
+                    onCheckedChange = { enabled ->
+                        haptics.performHapticFeedback(if (enabled) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
+                        onVpnToggle(enabled)
+                    },
+                    enabled = tunnel.status != TunnelStatus.STARTING && tunnel.status != TunnelStatus.REFRESHING,
+                )
             }
             if (tunnel.status == TunnelStatus.RUNNING || tunnel.status == TunnelStatus.REFRESHING) {
                 val hitRate = if (tunnel.totalQueries > 0) tunnel.cacheHits * 100 / tunnel.totalQueries else 0
-                Text(
-                    "${tunnel.profileTitle} · MTU ${tunnel.mtu} · ${tunnel.totalQueries} sorgu · önbellek %$hitRate · hata ${tunnel.failures}",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                HorizontalDivider()
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    StatChip("MTU", tunnel.mtu.toString(), Modifier.weight(1f))
+                    StatChip("SORGU", tunnel.totalQueries.toString(), Modifier.weight(1f))
+                    StatChip("ÖNBELLEK", "%$hitRate", Modifier.weight(1f))
+                    StatChip("HATA", tunnel.failures.toString(), Modifier.weight(1f))
+                }
+                HorizontalDivider(color = LocalGlass.current.border)
                 tunnel.upstreams.forEach { UpstreamRow(it) }
             } else {
                 Text(
@@ -284,6 +326,14 @@ private fun DnsStatusCard(tunnel: DnsTunnelState) {
 }
 
 @Composable
+private fun StatChip(label: String, value: String, modifier: Modifier = Modifier) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+        Text(value, style = MetricText.medium, maxLines = 1)
+    }
+}
+
+@Composable
 private fun UpstreamRow(upstream: UpstreamStats) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Surface(
@@ -291,11 +341,11 @@ private fun UpstreamRow(upstream: UpstreamStats) {
             shape = CircleShape,
             modifier = Modifier.size(8.dp),
         ) {}
-        Spacer(Modifier.width(8.dp))
-        Text("${upstream.name} ${upstream.address}", fontFamily = FontFamily.Monospace, modifier = Modifier.weight(1f))
-        Text(upstream.ewmaRttMs?.let { "$it ms" } ?: "—", fontFamily = FontFamily.Monospace)
-        Spacer(Modifier.width(8.dp))
-        Text("★${upstream.wins}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(10.dp))
+        Text("${upstream.name} ${upstream.address}", style = MetricText.mono, modifier = Modifier.weight(1f))
+        Text(upstream.ewmaRttMs?.let { "$it ms" } ?: "—", style = MetricText.mono)
+        Spacer(Modifier.width(10.dp))
+        Text("★${upstream.wins}", style = MetricText.mono, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -307,21 +357,20 @@ private fun StatusPill(status: TunnelStatus) {
         TunnelStatus.ERROR -> QualityColors.Weak
         TunnelStatus.STOPPED -> MaterialTheme.colorScheme.onSurfaceVariant
     }
-    Surface(color = color.copy(alpha = 0.16f), shape = RoundedCornerShape(50)) {
-        Text(
-            status.label,
-            color = color,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-        )
+    Surface(color = color.copy(alpha = 0.14f), shape = RoundedCornerShape(50)) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(color = color, shape = CircleShape, modifier = Modifier.size(7.dp)) {}
+            Spacer(Modifier.width(6.dp))
+            Text("DNS ${status.label}", color = color, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+        }
     }
 }
 
 @Composable
 private fun ReportCard(steps: List<String>) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Son optimizasyon", style = MaterialTheme.typography.titleMedium)
+    GlassCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("SON OPTİMİZASYON", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             steps.forEach { Text("• $it", style = MaterialTheme.typography.bodyMedium) }
         }
     }
@@ -329,65 +378,18 @@ private fun ReportCard(steps: List<String>) {
 
 // ------------------------------------------------------------------ Bottom
 
+/** Floating action area: only the glowing optimise pill, over a fade so content scrolls beneath it. */
 @Composable
-private fun ControlBar(
-    isOptimizing: Boolean,
-    vpnEnabled: Boolean,
-    tunnelStatus: TunnelStatus,
-    profileTitle: String,
-    onOptimize: () -> Unit,
-    onVpnToggle: (Boolean) -> Unit,
-) {
-    val haptics = LocalHapticFeedback.current
-    Surface(tonalElevation = 3.dp, shadowElevation = 6.dp) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("DNS Tüneli (VPN)", style = MaterialTheme.typography.titleSmall)
-                    Text(
-                        "Profil: $profileTitle",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = vpnEnabled,
-                    onCheckedChange = { enabled ->
-                        haptics.performHapticFeedback(if (enabled) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
-                        onVpnToggle(enabled)
-                    },
-                    enabled = tunnelStatus != TunnelStatus.STARTING && tunnelStatus != TunnelStatus.REFRESHING,
-                )
-            }
-            Button(
-                onClick = {
-                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onOptimize()
-                },
-                enabled = !isOptimizing,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-            ) {
-                if (isOptimizing) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Text("Optimize ediliyor…")
-                } else {
-                    Text("Ağı Optimize Et", fontWeight = FontWeight.SemiBold)
-                }
-            }
-        }
+private fun ActionBar(running: Boolean, onOptimize: () -> Unit) {
+    val background = MaterialTheme.colorScheme.background
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(listOf(Color.Transparent, background.copy(alpha = 0.92f), background)))
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal))
+            .padding(start = 24.dp, end = 24.dp, top = 28.dp, bottom = 14.dp),
+    ) {
+        OptimizeButton(running = running, onClick = onOptimize)
     }
 }
 
@@ -424,7 +426,7 @@ private fun MainScreenPreview() {
                     cell = CellDetails(
                         lte = LteCellDetails("286", "02", "Operatör", 12345678, 48225, 78, 211, 41201, 1300, listOf(3)),
                     ),
-                    score = QualityScore(72, SignalQuality.EXCELLENT),
+                    score = QualityScore(82, SignalQuality.EXCELLENT),
                 ),
                 tunnel = DnsTunnelState(
                     status = TunnelStatus.RUNNING,
