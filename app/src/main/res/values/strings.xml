@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NetPulse</string>
+    <string name="vpn_session_name">NetPulse DNS Tüneli</string>
+    <string name="notification_channel_name">DNS Tüneli</string>
+    <string name="notification_channel_desc">Yerel DNS tünelinin çalıştığını gösterir</string>
+    <string name="notification_title">Güvenli DNS tüneli aktif</string>
+    <string name="notification_stop">Durdur</string>
+</resources>
